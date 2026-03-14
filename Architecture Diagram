@@ -1,0 +1,27 @@
+User Upload CSV
+      │
+      ▼
+S3 (raw/)
+      │
+      ▼
+S3 to DynamoDB Lambda
+Parse CSV
+      │
+      ▼
+DynamoDB
+AttendanceRecords
+      │
+      ▼
+Processing DynamoDB Lambda
+Build summaries
+      │
+      ▼
+DynamoDB
+AttendanceSummary
+      │
+      ▼
+Place processed data in S3 Lambda
+Export results
+      │
+      ▼
+S3 (processed/)
