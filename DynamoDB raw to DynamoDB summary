@@ -1,0 +1,194 @@
+#Reads raw attendance records from one DynamoDB table, then makes a grouped summary, and writes said summaries to another DynamoDB table
+import json
+from decimal import Decimal
+from collections import defaultdict
+
+import boto3
+from botocore.exceptions import ClientError
+
+dynamodb = boto3.resource("dynamodb")
+
+SOURCE_TABLE_NAME = "AttendanceRecords"
+TARGET_TABLE_NAME = "AttendanceSummary"
+
+source_table = dynamodb.Table(SOURCE_TABLE_NAME)
+target_table = dynamodb.Table(TARGET_TABLE_NAME)
+
+
+def lambda_handler(event, context):
+    print("Starting attendance summary generation...")
+    print(f"Using source table: {SOURCE_TABLE_NAME}")
+    print(f"Using target table: {TARGET_TABLE_NAME}")
+    print(f"Received event: {json.dumps(event)}")
+
+    try:
+        # Check that source and target tables exist
+        verify_table_exists(source_table, SOURCE_TABLE_NAME)
+        verify_table_exists(target_table, TARGET_TABLE_NAME)
+
+        # Read all attendance data from source table
+        all_items = scan_entire_table(source_table)
+        print(f"Total records fetched from {SOURCE_TABLE_NAME}: {len(all_items)}")
+
+        if not all_items:
+            return {
+                "statusCode": 200,
+                "body": json.dumps({
+                    "message": "No attendance records found.",
+                    "source_records": 0,
+                    "summary_records_written": 0
+                })
+            }
+
+        # Build summaries
+        structured_summaries = build_attendance_summary(all_items)
+        print(f"Total summary records created: {len(structured_summaries)}")
+
+        # Write to target table
+        written_count = write_summary_records(target_table, structured_summaries)
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "message": "Attendance summary generation completed successfully.",
+                "source_records": len(all_items),
+                "summary_records_written": written_count
+            }, default=decimal_to_native)
+        }
+
+    except Exception as e:
+        print(f"Fatal error: {str(e)}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({
+                "message": "Failed to process attendance summaries.",
+                "error": str(e)
+            })
+        }
+
+
+def verify_table_exists(table, table_name):
+    """
+    Verifies that the DynamoDB table exists and is accessible.
+    """
+    try:
+        table.load()
+        print(f"Verified table exists: {table_name}")
+    except ClientError as e:
+        raise Exception(f"Table '{table_name}' not found or not accessible: {str(e)}")
+
+
+def scan_entire_table(table):
+    """
+    Scans the entire DynamoDB table and returns all items.
+    Handles pagination automatically.
+    """
+    items = []
+    response = table.scan()
+    items.extend(response.get("Items", []))
+
+    while "LastEvaluatedKey" in response:
+        response = table.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
+        items.extend(response.get("Items", []))
+
+    return items
+
+
+def build_attendance_summary(items):
+    """
+    Groups attendance records by StudentID + Course and creates structured summaries.
+    """
+    grouped = defaultdict(lambda: {
+        "StudentID": "",
+        "Course": "",
+        "StudentName": "",
+        "TotalClasses": 0,
+        "PresentCount": 0,
+        "AbsentCount": 0,
+        "AttendanceDates": [],
+        "SourceFiles": set()
+    })
+
+    for item in items:
+        student_id = str(item.get("StudentID", "")).strip()
+        course = str(item.get("Course", "")).strip()
+        student_name = str(item.get("StudentName", "")).strip()
+        attendance = str(item.get("Attendance", "")).strip()
+        date = str(item.get("Date", "")).strip()
+        source_file = str(item.get("SourceFileName", "")).strip()
+
+        if not student_id or not course:
+            print(f"Skipping invalid item: {item}")
+            continue
+
+        group_key = (student_id, course)
+        summary = grouped[group_key]
+
+        summary["StudentID"] = student_id
+        summary["Course"] = course
+        summary["StudentName"] = student_name
+        summary["TotalClasses"] += 1
+
+        if attendance == "Present":
+            summary["PresentCount"] += 1
+        elif attendance == "Absent":
+            summary["AbsentCount"] += 1
+
+        if date:
+            summary["AttendanceDates"].append({
+                "Date": date,
+                "Attendance": attendance
+            })
+
+        if source_file:
+            summary["SourceFiles"].add(source_file)
+
+    structured_records = []
+
+    for (_, _), summary in grouped.items():
+        total = summary["TotalClasses"]
+        present = summary["PresentCount"]
+        absent = summary["AbsentCount"]
+
+        attendance_percentage = round((present / total) * 100, 2) if total > 0 else 0.0
+
+        structured_record = {
+            "StudentID": summary["StudentID"],
+            "Course": summary["Course"],
+            "StudentName": summary["StudentName"],
+            "TotalClasses": total,
+            "PresentCount": present,
+            "AbsentCount": absent,
+            "AttendancePercentage": Decimal(str(attendance_percentage)),
+            "AttendanceDates": sorted(summary["AttendanceDates"], key=lambda x: x["Date"]),
+            "SourceFiles": sorted(list(summary["SourceFiles"]))
+        }
+
+        structured_records.append(structured_record)
+
+    return structured_records
+
+
+def write_summary_records(table, summary_records):
+    """
+    Writes structured summary records into target DynamoDB table using batch_writer.
+    """
+    count = 0
+
+    with table.batch_writer() as batch:
+        for record in summary_records:
+            batch.put_item(Item=record)
+            count += 1
+
+    return count
+
+
+def decimal_to_native(obj):
+    """
+    Converts Decimal objects to float/int for JSON serialization.
+    """
+    if isinstance(obj, Decimal):
+        if obj % 1 == 0:
+            return int(obj)
+        return float(obj)
+    raise TypeError(f"Type not serializable: {type(obj)}")
