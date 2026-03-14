@@ -1,0 +1,21 @@
+#This IAM policy allows Lambda to write and create logs for the process-attendance log group.
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": "logs:CreateLogGroup",
+            "Resource": "arn:aws:logs:ap-south-1:975050209656:*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": [
+                "arn:aws:logs:ap-south-1:975050209656:log-group:/aws/lambda/process-attendance-csv:*"
+            ]
+        }
+    ]
+}
